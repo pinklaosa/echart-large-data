@@ -1,7 +1,7 @@
 import { useState, useLayoutEffect, useRef, useCallback } from "react";
 import ReactECharts from "echarts-for-react";
 import * as Comlink from 'comlink';
-import { generateTimeSeriesData, generateRandomData } from "../utils/datapoints";
+import { generateTimeSeriesData, generateRandomWalkData } from "../utils/datapoints";
 
 const Line = ({ selectedRows }) => {
   const chartRef = useRef(null);
@@ -18,23 +18,55 @@ const Line = ({ selectedRows }) => {
   const updateChartData = useCallback(async () => {
     const chartInstance = getChartInstance();
     if (!chartInstance) return;
-    
+   
     try {
       // If we have selected rows & worker is ready, process data
       if (selectedRows.size > 0 && workerAPIRef.current) {
         // Show loading state
-        chartInstance.showLoading();
         
-        const count = 10000;
+         chartInstance.showLoading();
+        const count = 1000000;
         const dates = generateTimeSeriesData(count);
         const keys = Array.from(selectedRows);
-        const allValues = keys.map(() => generateRandomData(count));
         
+        // Generate data in chunks to prevent UI blocking
+        const chunkSize = 100000;
+        const chunks = Math.ceil(count / chunkSize);
+        
+        // Initialize empty arrays for each key
+        const allValues = keys.map(() => []);
+        
+        // Process data in chunks
+        for (let i = 0; i < chunks; i++) {
+            const start = i * chunkSize;
+            const end = Math.min(start + chunkSize, count);
+            
+            // Generate chunk of data for each key
+            const chunkData = await Promise.all(keys.map(async () => {
+                const data = generateRandomWalkData(end - start, 1, 0, 100);
+                return data.map(item => item.data1);
+            }));
+            
+            // Append chunk data to main arrays
+            chunkData.forEach((data, index) => {
+                allValues[index].push(...data);
+            });
+            
+            // Update progress
+            const progress = Math.round((i + 1) / chunks * 100);
+            chartInstance.setOption({
+                title: {
+                    text: `Loading data... ${progress}%`,
+                    left: 'center'
+                }
+            });
+        }
+
         // Process data in worker
         const dataset = await workerAPIRef.current.mergeDataPoints(dates, allValues, keys);
         datasetRef.current = dataset;
         
-        // Update chart directly without state change
+        // Update chart with optimized settings
         chartInstance.setOption({
           title: { text: "Price History", left: "center" },
           tooltip: { 
@@ -44,9 +76,8 @@ const Line = ({ selectedRows }) => {
           legend: { 
             data: keys.map((key) => `Coin ${key}`), 
             bottom: 0,
-            selected: {}, // Auto-select all by default
+            selected: {}, 
           },
-          // Optimize for large datasets
           animation: false,
           dataset: { 
             source: dataset,
@@ -58,11 +89,10 @@ const Line = ({ selectedRows }) => {
             scale: true,
             axisLabel: {
               formatter: (value) => {
-                // Simplified date display for performance
                 return value.split('-').slice(1).join('-');
-              }
+              },
+              interval: Math.floor(count / 10) // Show fewer labels
             },
-            // Optimize for performance
             axisPointer: {
               snap: false,
               label: {
@@ -76,7 +106,6 @@ const Line = ({ selectedRows }) => {
             type: "value",
             scale: true,
           },
-          // Enable data zoom for large datasets
           dataZoom: [
             {
               type: 'inside',
@@ -89,23 +118,23 @@ const Line = ({ selectedRows }) => {
               end: 100
             }
           ],
-          // Enable progressive rendering for large datasets
-          progressive: 500,
-          progressiveThreshold: 3000,
-          // Faster rendering
+          progressive: 1000,
+          progressiveThreshold: 5000,
           series: keys.map((key) => ({
             type: "line",
             name: `Coin ${key}`,
             encode: { x: 'timestamp', y: key },
-            sampling: 'lttb', // Large Time Series Sampling
+            sampling: 'lttb',
             large: true,
-            largeThreshold: 500,
+            largeThreshold: 1000,
             smooth: true,
             showSymbol: false,
+            lineStyle: {
+              width: 1
+            }
           }))
-        }, true); // True parameter preserves other options
+        }, true);
         
-        // Hide loading state
         chartInstance.hideLoading();
       } else if (selectedRows.size === 0) {
         // No coins selected - show empty state
@@ -134,7 +163,7 @@ const Line = ({ selectedRows }) => {
   useLayoutEffect(() => {
     // Create and wrap worker with Comlink
     const worker = new Worker(
-      new URL('../utils/worker-comlink.js', import.meta.url), 
+      new URL('../workers/worker-comlink.js', import.meta.url), 
       { type: 'module' }
     );
     const workerAPI = Comlink.wrap(worker);
